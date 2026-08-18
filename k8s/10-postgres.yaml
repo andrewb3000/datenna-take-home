@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-sa
+  namespace: datenna
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: datenna
+data:
+  10-create-app-user.sh: |
+    #!/bin/sh
+    # Runs once, only when Postgres first initializes an empty data directory.
+    #
+    # Creates a least-privilege role for the app — distinct from the superuser
+    # ($POSTGRES_USER) used to bootstrap this container — so the app never holds
+    # superuser credentials. Its password comes from the same Vault-rendered file
+    # the app itself reads (secret/data/postgres's app_password field), not a
+    # copy of the superuser password.
+    #
+    # Schema (table creation) is owned by this script, run as the superuser — not
+    # by the app at runtime. Postgres 15+ revokes CREATE on the public schema from
+    # non-owner roles by default; app_user only ever gets DML (SELECT/INSERT/
+    # UPDATE/DELETE), never DDL, matching how a real deployment would separate a
+    # migration identity from the application's runtime identity.
+    set -e
+    APP_PASSWORD="$(cat /vault/secrets/app-db-password)"
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+      CREATE TABLE IF NOT EXISTS items (
+          id SERIAL PRIMARY KEY,
+          value TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE ROLE app_user WITH LOGIN PASSWORD '$APP_PASSWORD';
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
+    EOSQL
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: datenna
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: datenna
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "postgres"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/agent-inject-secret-postgres-password: "secret/data/postgres"
+        vault.hashicorp.com/agent-inject-template-postgres-password: |
+          {{- with secret "secret/data/postgres" -}}
+          {{ .Data.data.password }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-app-db-password: "secret/data/postgres"
+        vault.hashicorp.com/agent-inject-template-app-db-password: |
+          {{- with secret "secret/data/postgres" -}}
+          {{ .Data.data.app_password }}
+          {{- end -}}
+    spec:
+      serviceAccountName: postgres-sa
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          envFrom:
+            - configMapRef:
+                name: app-config
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: init-scripts
+          configMap:
+            name: postgres-init-scripts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: datenna
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: datenna
+data:
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "appdb"
+  DB_USER: "app_user"
+  POSTGRES_DB: "appdb"
+  POSTGRES_USER: "postgres"
+  MINIO_ENDPOINT: "http://minio:9000"
+  BUCKET_NAME: "items"
+  # Like DB_USER, this is an identifier, not a secret — stable across rotations so
+  # that rotating the app's MinIO credential only ever means rotating the secret key
+  # (secret/data/app's minio_secret_key in Vault), never re-provisioning a new IAM user.
+  MINIO_ACCESS_KEY: "app"
+  POSTGRES_PASSWORD_FILE: "/vault/secrets/postgres-password"
+  MINIO_ROOT_USER_FILE: "/vault/secrets/minio-root-user"
+  MINIO_ROOT_PASSWORD_FILE: "/vault/secrets/minio-root-password"

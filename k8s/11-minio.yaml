@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: minio-sa
+  namespace: datenna
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: datenna
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: datenna
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "minio"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/agent-inject-secret-minio-root-user: "secret/data/minio"
+        vault.hashicorp.com/agent-inject-template-minio-root-user: |
+          {{- with secret "secret/data/minio" -}}
+          {{ .Data.data.root_user }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-minio-root-password: "secret/data/minio"
+        vault.hashicorp.com/agent-inject-template-minio-root-password: |
+          {{- with secret "secret/data/minio" -}}
+          {{ .Data.data.root_password }}
+          {{- end -}}
+    spec:
+      serviceAccountName: minio-sa
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          # Bypass docker-entrypoint.sh (the official image's ubi9-micro base ships no
+          # shell) and exec the binary directly; MINIO_ROOT_USER_FILE/PASSWORD_FILE are
+          # read by the binary itself.
+          command: ["/usr/bin/minio"]
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER_FILE
+              value: /vault/secrets/minio-root-user
+            - name: MINIO_ROOT_PASSWORD_FILE
+              value: /vault/secrets/minio-root-password
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: datenna
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
